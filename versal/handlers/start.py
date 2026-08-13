@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -26,12 +26,13 @@ log = logging.getLogger(__name__)
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext) -> None:
+async def cmd_start(message: Message, command: CommandObject, state: FSMContext) -> None:
     await state.clear()
 
     # Deep-link от QR-кода гостя: t.me/bot?start=gl_<token>
-    payload = message.text.split(" ", 1)[1] if (message.text and " " in message.text) else ""
-    if payload.startswith("gl_"):
+    # command.args надёжнее split(): корректно снимает /start@botname.
+    payload = (command.args or "").strip()
+    if payload.lower().startswith("gl_"):
         log.info("Валидация по deep-link от %s: %s", message.from_user.id, payload)
         await validate_ticket_message(message, payload[3:])
         return

@@ -33,7 +33,8 @@ from versal.db.repo import (
     unblock_user,
 )
 from versal.db.models import GuestTicket, User
-from versal.services.security import make_ticket_token, parse_ticket_token
+from versal.services.assets import qr_deep_link
+from versal.services.security import make_ticket_token, parse_ticket_token, telegram_start_param
 
 settings.ensure_dirs()
 
@@ -53,9 +54,20 @@ async def main() -> None:
         ticket = await create_ticket(session, guest)
         parsed = parse_ticket_token(ticket.token)
         assert parsed == ticket.id, (parsed, ticket.id)
+        assert "_" in ticket.token and "." not in ticket.token, ticket.token
+        # Старый формат с точкой (до фикса deep-link) тоже должен парситься.
+        assert parse_ticket_token(ticket.token.replace("_", ".")) == ticket.id
         assert parse_ticket_token("1.bad") is None
+        assert parse_ticket_token("1_bad") is None
         assert parse_ticket_token("abc.def") is None
         assert parse_ticket_token("") is None
+        start_param = telegram_start_param(ticket.token)
+        assert start_param.startswith("gl_")
+        assert all(c.isalnum() or c in "_-" for c in start_param), start_param
+        assert len(start_param) <= 64
+        # Даже если в БД лежит старый токен с точкой — в ссылку идёт безопасный вариант.
+        old_style_url = qr_deep_link("demo_nightclub_bot", ticket.token.replace("_", "."))
+        assert "." not in old_style_url.split("?start=", 1)[1]
         print(f"  OK токен подписан и распознаётся: {ticket.token}")
 
         # --- лимит/счётчик -------------------------------------------------
@@ -107,15 +119,19 @@ async def main() -> None:
         # --- авто-распознавание deep-link (search=True, не match!) -------------
         from magic_filter import F
 
-        gl_filter = F.text.regexp(r"(?:gl_)?\d+\.[0-9a-f]{16}", search=True)
+        gl_filter = F.text.regexp(r"(?:gl_)?\d+[._][0-9a-f]{16}", search=True)
 
         class _T:
             def __init__(self, text):
                 self.text = text
 
-        url = f"https://t.me/demo_nightclub_bot?start=gl_{ticket.token}"
+        url = qr_deep_link("demo_nightclub_bot", ticket.token)
+        assert "?start=gl_" in url and "." not in url.split("?start=", 1)[1]
         assert bool(gl_filter.resolve(_T(url))) is True, "URL-ссылка должна распознаваться"
         assert bool(gl_filter.resolve(_T(ticket.token))) is True, "голый токен должен распознаваться"
+        # Старая ссылка с точкой (если вставили в чат вручную) тоже распознаётся
+        old_url = f"https://t.me/demo_nightclub_bot?start=gl_{ticket.token.replace('_', '.')}"
+        assert bool(gl_filter.resolve(_T(old_url))) is True, "старая URL с точкой должна распознаваться"
         assert bool(gl_filter.resolve(_T("привет, как дела?"))) is False, "обычный текст не должен срабатывать"
         print("  OK авто-распознавание deep-link (search=True) работает")
 

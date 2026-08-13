@@ -18,8 +18,9 @@ from versal.texts import SCAN_PROMPT, VAL_EXPIRED, VAL_GUEST_NOTICE, VAL_INVALID
 router = Router()
 
 # Единый паттерн токена: и для фильтра сообщений, и для поиска в тексте
-# (см. декоратор auto_detect_scan ниже).
-_TOKEN_CORE = r"(\d+\.[0-9a-f]{16})"
+# (см. декоратор auto_detect_scan ниже). Разделитель '_' (Telegram start-param)
+# или '.' (старые квитки, если ссылку вставили в чат вручную).
+_TOKEN_CORE = r"(\d+[._][0-9a-f]{16})"
 _TOKEN_PATTERN = rf"(?:gl_)?{_TOKEN_CORE}"
 GL_TOKEN_RE = re.compile(_TOKEN_PATTERN, re.IGNORECASE)
 
@@ -126,12 +127,12 @@ async def cmd_scan(message: Message) -> None:
         return
 
     # Принимаем и голый токен, и полную ссылку:
-    #  3.47321609694f654f
-    #  https://t.me/demo_nightclub_bot?start=gl_3.47321609694f654f
+    #  3_47321609694f654f
+    #  https://t.me/demo_nightclub_bot?start=gl_3_47321609694f654f
     raw = parts[1].strip()
     if "?start=" in raw:
         raw = raw.split("?start=")[1]
     raw = raw.split("/")[-1]
-    if raw.startswith("gl_"):
+    if raw.lower().startswith("gl_"):
         raw = raw[3:]
     await validate_ticket_message(message, raw)
