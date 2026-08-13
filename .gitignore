@@ -1,0 +1,13 @@
+.env
+.venv/
+.freebuff/
+__pycache__/
+*.pyc
+data/*.db
+data/bot.pid
+data/bot.log
+data/bot.err
+data/posters/*
+data/hall_scheme.png
+!data/.gitkeep
+!data/posters/.gitkeep
