@@ -8,6 +8,7 @@ from aiogram.types import BufferedInputFile
 from PIL import Image, ImageDraw
 
 from versal.config import settings
+from versal.services.security import telegram_start_param
 
 _bot_username: str | None = None
 
@@ -26,8 +27,12 @@ async def get_bot_username(bot) -> str:
 
 
 def qr_deep_link(username: str, token: str) -> str:
-    """Сканирование камерой открывает бота и запускает валидацию."""
-    return f"https://t.me/{username}?start=gl_{token}"
+    """Сканирование камерой открывает бота и запускает валидацию.
+
+    Параметр start содержит только A-Z a-z 0-9 _ - — иначе Telegram
+    отбрасывает payload, и по ссылке «ничего не происходит».
+    """
+    return f"https://t.me/{username}?start={telegram_start_param(token)}"
 
 
 def make_qr_image(data: str) -> BufferedInputFile:

@@ -12,21 +12,39 @@ def _sign(payload: str) -> str:
     return hmac.new(settings.secret_key.encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
 
 
+# Telegram ?start= допускает только A-Z a-z 0-9 _ - (точка запрещена и
+# молча отбрасывается — бот вообще не получает /start). Поэтому в токене
+# разделитель — '_'. Старые квитки с '.' по-прежнему распознаём.
+_TOKEN_SEP = "_"
+
+
 def make_ticket_token(ticket_id: int) -> str:
-    """Подписанный токен: <id>.<hmac>. В QR кладётся deep-link с этим токеном."""
+    """Подписанный токен: <id>_<hmac>. В QR кладётся deep-link с этим токеном."""
     payload = str(ticket_id)
-    return f"{payload}.{_sign(payload)}"
+    return f"{payload}{_TOKEN_SEP}{_sign(payload)}"
 
 
 def parse_ticket_token(token: str) -> int | None:
-    """Возвращает ticket_id, если подпись валидна, иначе None."""
+    """Возвращает ticket_id, если подпись валидна, иначе None.
+
+    Принимает и новый формат ``id_hmac``, и старый ``id.hmac``.
+    """
+    token = (token or "").strip()
+    sep = _TOKEN_SEP if _TOKEN_SEP in token else "." if "." in token else None
+    if sep is None:
+        return None
     try:
-        payload, signature = token.split(".", 1)
+        payload, signature = token.split(sep, 1)
         if hmac.compare_digest(_sign(payload), signature):
             return int(payload)
     except (ValueError, TypeError):
         return None
     return None
+
+
+def telegram_start_param(token: str) -> str:
+    """Payload для t.me/bot?start=… — без точек и прочих запрещённых символов."""
+    return f"gl_{token.replace('.', _TOKEN_SEP)}"
 
 
 def guest_list_deadline_time() -> dtime:
