@@ -6,11 +6,11 @@ from datetime import datetime
 from pathlib import Path
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from versal.config import settings
 from versal.db.base import SessionLocal
@@ -33,7 +33,8 @@ from versal.db.repo import (
     sweep_missed_tickets,
     unblock_user,
 )
-from versal.keyboards import admin_panel_kb, back_to_menu_kb
+from versal.handlers.reservations import reserve_admin_notify_text
+from versal.keyboards import admin_panel_kb, back_to_menu_kb, reserve_manage_kb
 from versal.services.security import format_deadline
 from versal.texts import ADMIN_ONLY, ADMIN_PANEL, CANCEL_ANY, DONE, NOT_FOUND
 from versal.utils import esc
@@ -260,6 +261,24 @@ async def event_poster(message: Message, state: FSMContext) -> None:
     await state.clear()
 
 
+async def _delete_event_by_id(event_id: int) -> bool:
+    """Удаляет подію и файл постера с диска; True, если подія была."""
+    async with SessionLocal() as session:
+        event = await get_event(session, event_id)
+        if event is None:
+            return False
+        poster = Path(event.poster_path) if event.poster_path else None
+        await session.delete(event)
+        await session.commit()
+    # Убираем файл постера с диска, чтобы мусор не копился
+    if poster and poster.exists():
+        try:
+            poster.unlink()
+        except OSError:
+            pass
+    return True
+
+
 @router.callback_query(F.data == "admin:del_event")
 async def admin_list_events(callback: CallbackQuery) -> None:
     await callback.answer()
@@ -270,11 +289,73 @@ async def admin_list_events(callback: CallbackQuery) -> None:
     if not events:
         await callback.message.answer("Подій немає.", reply_markup=back_to_menu_kb())
         return
-    lines = ["🗑 <b>Події</b> (видалити: <code>/del_event 3</code>):\n"]
+    lines = ["🗑 <b>Події</b> (натисніть кнопку, щоб видалити):\n"]
     for event in events:
         date_part = event.starts_at.strftime("%d.%m %H:%M") if event.starts_at else "без дати"
-        lines.append(f"#{event.id} • {date_part} • {event.title}")
-    await callback.message.answer("\n".join(lines), reply_markup=back_to_menu_kb())
+        lines.append(f"#{event.id} • {date_part} • {esc(event.title)}")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🗑 #{event.id} • {event.title[:40]}",
+                    callback_data=f"admin:del_event:{event.id}",
+                )
+            ]
+            for event in events
+        ]
+        + [[InlineKeyboardButton(text="⬅️ Головне меню", callback_data="menu:main")]]
+    )
+    await callback.message.answer("\n".join(lines), reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("admin:del_event:"))
+async def admin_del_event_confirm(callback: CallbackQuery) -> None:
+    """Кнопка «🗑 #id» — запрашиваем подтверждение перед удалением."""
+    await callback.answer()
+    if not _is_admin(callback.from_user.id):
+        return
+    rid = callback.data.split(":", 2)[2]
+    if not rid.isdigit():
+        return
+    async with SessionLocal() as session:
+        event = await get_event(session, int(rid))
+    if event is None:
+        await callback.message.answer(NOT_FOUND)
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Видалити", callback_data=f"admin:del_event_yes:{rid}"
+                ),
+                InlineKeyboardButton(text="❌ Ні", callback_data="admin:del_event_no"),
+            ]
+        ]
+    )
+    await callback.message.answer(
+        f"Видалити подію #{event.id} «{esc(event.title)}»?",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("admin:del_event_yes:"))
+async def admin_del_event_do(callback: CallbackQuery) -> None:
+    """Подтверждённое удаление."""
+    await callback.answer()
+    if not _is_admin(callback.from_user.id):
+        return
+    rid = callback.data.split(":", 2)[2]
+    if not rid.isdigit():
+        return
+    if await _delete_event_by_id(int(rid)):
+        await callback.message.edit_text("✅ Подію видалено.")
+    else:
+        await callback.message.edit_text(NOT_FOUND)
+
+
+@router.callback_query(F.data == "admin:del_event_no")
+async def admin_del_event_cancel(callback: CallbackQuery) -> None:
+    await callback.answer("Скасовано")
 
 
 @router.message(Command("del_event"))
@@ -285,21 +366,7 @@ async def admin_del_event(message: Message) -> None:
     if len(parts) < 2 or not parts[1].isdigit():
         await message.answer("Формат: <code>/del_event 3</code>")
         return
-    async with SessionLocal() as session:
-        event = await get_event(session, int(parts[1]))
-        if event is None:
-            await message.answer(NOT_FOUND)
-            return
-        poster = Path(event.poster_path) if event.poster_path else None
-        await session.delete(event)
-        await session.commit()
-    # Убираем файл постера с диска, чтобы мусор не копился
-    if poster and poster.exists():
-        try:
-            poster.unlink()
-        except OSError:
-            pass
-    await message.answer(DONE)
+    await message.answer(DONE if await _delete_event_by_id(int(parts[1])) else NOT_FOUND)
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +581,27 @@ async def admin_reserve_set(message: Message) -> None:
     await message.answer(f"✅ Бронь #{parts[1]}: <b>{parts[2]}</b>")
 
 
+async def _show_reserve_details(answer, rid: int) -> bool:
+    """Отправляет карточку брони; answer — callable, принимающий текст."""
+    async with SessionLocal() as session:
+        reservation = await session.get(TableReservation, rid)
+        if reservation is None:
+            await answer(NOT_FOUND)
+            return False
+        user = await session.get(User, reservation.user_id)
+        await answer(
+            f"🛋 <b>Бронь #{reservation.id}</b>\n"
+            f"👤 {esc(user.first_name or '?')} (@{esc(user.username or '-')})\n"
+            f"📞 {esc(user.phone or 'не вказано')}\n"
+            f"📅 {esc(reservation.date_text)}\n"
+            f"👥 {reservation.guests_count} ос.\n"
+            f"💬 {esc(reservation.wishes or '-')}\n"
+            f"📝 Статус: {esc(reservation.status)}\n"
+            f"🕒 Створено: {reservation.created_at.strftime('%d.%m.%Y %H:%M')}"
+        )
+    return True
+
+
 @router.message(Command("reserve_info"))
 async def admin_reserve_info(message: Message) -> None:
     if not _admin_only(message):
@@ -521,23 +609,49 @@ async def admin_reserve_info(message: Message) -> None:
     parts = message.text.split()
     if len(parts) < 2 or not parts[1].isdigit():
         return
+    await _show_reserve_details(message.answer, int(parts[1]))
+
+
+@router.callback_query(F.data.startswith("admin:reserve_info:"))
+async def admin_reserve_info_cb(callback: CallbackQuery) -> None:
+    """Кнопка «Деталі броні» в уведомлении."""
+    await callback.answer()
+    if not _is_admin(callback.from_user.id):
+        return
+    rid = callback.data.split(":", 2)[2]
+    if not rid.isdigit():
+        return
+    await _show_reserve_details(callback.message.answer, int(rid))
+
+
+@router.callback_query(F.data.startswith("admin:reserve_set:"))
+async def admin_reserve_set_cb(callback: CallbackQuery) -> None:
+    """Кнопки «Підтвердити» / «Скасувати» в уведомлении."""
+    await callback.answer()
+    if not _is_admin(callback.from_user.id):
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 4 or not parts[2].isdigit() or parts[3] not in ("new", "confirmed", "cancelled"):
+        return
+    rid, status = int(parts[2]), parts[3]
 
     async with SessionLocal() as session:
-        reservation = await session.get(TableReservation, int(parts[1]))
+        reservation = await session.get(TableReservation, rid)
         if reservation is None:
-            await message.answer(NOT_FOUND)
+            await callback.message.answer(NOT_FOUND)
             return
+        reservation.status = status
+        await session.commit()
         user = await session.get(User, reservation.user_id)
-        await message.answer(
-            f"🛋 <b>Бронь #{reservation.id}</b>\n"
-            f"👤 {esc(user.first_name or '?')} (@{esc(user.username or '-')})\n"
-            f"📞 {esc(user.phone or 'не вказано')}\n"
-            f"📅 {esc(reservation.date_text)}\n"
-            f"👥 {reservation.guests_count} ос.\n"
-            f"💬 {esc(reservation.wishes or '-')}\n"
-            f"📝 Статус: {reservation.status}\n"
-            f"🕒 Створено: {reservation.created_at.strftime('%d.%m.%Y %H:%M')}"
-        )
+        # Обновляем само уведомление прямо в чате: новый статус + кнопки
+        try:
+            await callback.message.edit_text(
+                reserve_admin_notify_text(reservation, user),
+                reply_markup=reserve_manage_kb(rid),
+            )
+        except TelegramBadRequest:
+            pass  # сообщение могли удалить или уже изменить
+        await callback.message.answer(f"✅ Бронь #{rid}: <b>{status}</b>")
 
 
 # ---------------------------------------------------------------------------

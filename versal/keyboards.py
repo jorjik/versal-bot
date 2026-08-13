@@ -47,6 +47,30 @@ def guest_list_confirm_kb() -> InlineKeyboardMarkup:
     )
 
 
+def reserve_manage_kb(reservation_id: int) -> InlineKeyboardMarkup:
+    """Кнопки для админа в уведомлении о новой брони."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📋 Деталі броні",
+                    callback_data=f"admin:reserve_info:{reservation_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Підтвердити",
+                    callback_data=f"admin:reserve_set:{reservation_id}:confirmed",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Скасувати",
+                    callback_data=f"admin:reserve_set:{reservation_id}:cancelled",
+                ),
+            ],
+        ]
+    )
+
+
 def admin_panel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

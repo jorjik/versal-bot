@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 from versal.config import settings
 from versal.db.base import SessionLocal
 from versal.db.repo import create_reservation, get_or_create_user
-from versal.keyboards import back_to_menu_kb
+from versal.keyboards import back_to_menu_kb, reserve_manage_kb
 from versal.services.assets import ensure_hall_scheme
 from versal.services.security import reserve_limiter
 from versal.utils import esc
@@ -37,6 +37,21 @@ async def _registered_user(message: Message) -> bool:
     async with SessionLocal() as session:
         user = await get_or_create_user(session, message.from_user.id)
         return bool(user.phone)
+
+
+def reserve_admin_notify_text(reservation, user) -> str:
+    """Текст уведомления админу о брони (ввод пользователя экранирован)."""
+    text = RESERVE_ADMIN_NOTIFY.format(
+        id=reservation.id,
+        name=esc(user.first_name or "Гість"),
+        username=esc(user.username or "-"),
+        phone=esc(user.phone or "не вказано"),
+        date_text=esc(reservation.date_text),
+        guests=reservation.guests_count,
+        wishes=esc(reservation.wishes or "без побажань"),
+    )
+    text += f"\n\n📝 Статус: <b>{esc(reservation.status)}</b>"
+    return text
 
 
 @router.callback_query(F.data == "menu:reserve")
@@ -110,20 +125,11 @@ async def reserve_wishes(message: Message, state: FSMContext) -> None:
     await message.answer(RESERVE_DONE.format(phone=esc(phone)), reply_markup=back_to_menu_kb())
 
     # Уведомляем администраторов (экранируем пользовательский ввод)
-    name = esc(user.first_name or "Гість")
-    username = esc(user.username or "-")
-    notify = RESERVE_ADMIN_NOTIFY.format(
-        id=reservation.id,
-        name=name,
-        username=username,
-        phone=esc(phone),
-        date_text=esc(reservation.date_text),
-        guests=reservation.guests_count,
-        wishes=esc(wishes),
-    )
+    notify = reserve_admin_notify_text(reservation, user)
+    kb = reserve_manage_kb(reservation.id)
     for admin_id in settings.admin_ids:
         try:
-            await message.bot.send_message(admin_id, notify)
+            await message.bot.send_message(admin_id, notify, reply_markup=kb)
         except Exception:
             pass  # админ мог заблокировать бота — не роняем поток
 
